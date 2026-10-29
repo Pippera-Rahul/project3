@@ -46,13 +46,66 @@ def investigate(
     logistics_fail_after: int = 5,
     memory: SharedMemory | None = None,
 ) -> InvestigationResult:
-    # TODO: Run every reader (audit, logistics, quality, and read_news for each
-    #   article in data_dir/news). Pass fail_after to read_logistics only when
-    #   simulate_logistics_timeout is set.
-    # TODO: Keep only claims from successful reads (r.ok). For each FAILED read,
-    #   record an "unavailable" note and map the source's EXCLUSIVE_METRICS to a
-    #   gap reason — but only for metrics no surviving source reported.
-    # TODO: Add ONLY the successful claims to shared memory (never partial results),
-    #   then call build_briefing with the unavailable annotations. Return an
-    #   InvestigationResult carrying the briefing and all reader_results.
-    raise NotImplementedError
+    """Run all source readers and recover locally from individual failures."""
+    data_dir = Path(data_dir)
+
+    reader_results: list[ReaderResult] = [
+        read_audit(data_dir / "audit.json"),
+    ]
+
+    if simulate_logistics_timeout:
+        reader_results.append(
+            read_logistics(
+                data_dir / "logistics.csv",
+                fail_after=logistics_fail_after,
+            )
+        )
+    else:
+        reader_results.append(read_logistics(data_dir / "logistics.csv"))
+
+    reader_results.append(read_quality(data_dir / "quality.sqlite"))
+
+    news_dir = data_dir / "news"
+    for article_path in sorted(news_dir.glob("*.txt")):
+        reader_results.append(read_news(article_path, extractor))
+
+    # Failed reads may carry partial results, but those are not trusted as
+    # successful source output and must not enter synthesis or shared memory.
+    successful_claims = [
+        claim
+        for result in reader_results
+        if result.ok
+        for claim in result.claims
+    ]
+
+    successful_metric_ids = {claim.metric_id for claim in successful_claims}
+    unavailable: dict[str, str] = {}
+    unavailable_sources: list[str] = []
+
+    for result in reader_results:
+        if result.ok:
+            continue
+
+        unavailable_sources.append(result.source)
+        failure_type = result.error.failure_type if result.error else "unknown failure"
+
+        for metric_id in EXCLUSIVE_METRICS.get(result.source, ()):
+            if metric_id not in successful_metric_ids:
+                unavailable[metric_id] = (
+                    f"{result.source} unavailable: {failure_type}"
+                )
+
+    shared_memory = memory if memory is not None else SharedMemory()
+    shared_memory.add_claims(successful_claims)
+
+    briefing = build_briefing(
+        supplier,
+        successful_claims,
+        shared_memory,
+        unavailable=unavailable,
+        unavailable_sources=unavailable_sources,
+    )
+    return InvestigationResult(
+        briefing=briefing,
+        reader_results=reader_results,
+    )

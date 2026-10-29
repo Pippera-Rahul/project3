@@ -125,11 +125,23 @@ def read_logistics(path: str | Path, *, fail_after: int | None = None) -> Reader
     if not rows:
         return ReaderResult(source=LOGISTICS, ok=True, claims=[])
 
-    # TODO (Exercise 3): Simulate a timeout. When `fail_after` is set and there are
-    #   more rows than that, compute partial claims from rows[:fail_after] and
-    #   return ReaderResult(ok=False, error=FailureContext(failure_type="timeout",
-    #   partial_results=partial, ...)). Do not raise. Until you add this, the
-    #   source always reads fully.
+    if fail_after is not None and len(rows) > fail_after:
+        partial_rows = rows[:fail_after]
+        partial_claims = _logistics_claims(partial_rows) if partial_rows else []
+        return ReaderResult(
+            source=LOGISTICS,
+            ok=False,
+            error=FailureContext(
+                failure_type="timeout",
+                attempted=f"read {fail_after} of {len(rows)} shipment rows",
+                partial_results=partial_claims,
+                alternatives=[
+                    "retry the shipment extract",
+                    "request a fresh extract from the 3PL portal",
+                ],
+            ),
+        )
+
     return ReaderResult(source=LOGISTICS, ok=True, claims=_logistics_claims(rows))
 
 
